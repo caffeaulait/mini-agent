@@ -1,6 +1,7 @@
 import { createInterface } from 'node:readline';
 import { loadConfig } from './config.js';
 import { Chat } from './chat.js';
+import { installCliConfirm } from './tools.js';
 import { err, out, paint } from './color.js';
 
 const config = loadConfig();
@@ -8,7 +9,7 @@ const chat = new Chat(config.baseURL, config.apiKey, config.model);
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 
-// 用彩色提示符标注「用户输入」这一侧。
+// 用彩色提示符标注「用户输入」这一侧，避免再整行回显造成重复。
 rl.setPrompt(paint('user', 'You › '));
 
 let busy = false;
@@ -20,10 +21,14 @@ function printHelp(): void {
   /help   显示帮助
   /reset  清空本轮对话记忆
   /exit   退出（等价于 Ctrl+C / Ctrl+D）
+已接入工具：get_current_time（当前时间）、run_shell（执行 shell 命令，执行前需确认）——模型需要时会自动调用。
 输入任意内容即可与模型对话。`,
     true,
   );
 }
+
+// 把「基于主 REPL 那一个 readline 的确认」注入工具层（后续做权限模型时可替换 setConfirmFn）。
+installCliConfirm(rl);
 
 rl.on('line', async (raw) => {
   if (busy) return; // 上一轮还在流式输出，忽略连发输入
@@ -50,7 +55,7 @@ rl.on('line', async (raw) => {
       try {
         out('sys', '\n'); // 模型回复另起一行
         for await (const delta of chat.streamReply(line)) {
-          out('model', delta);
+          out(delta.startsWith('\n[调用工具') ? 'tool' : 'model', delta);
         }
         out('sys', '\n');
       } catch (e) {
@@ -70,7 +75,7 @@ rl.on('close', () => {
 
 out(
   'sys',
-  `Mini Agent Day 1 —— 最简单的 Agent（模型：${config.model}，输入 /help 查看命令）`,
+  `Mini Agent Day 3 —— Agent 动手：Shell 执行工具（模型：${config.model}，输入 /help 查看命令）`,
   true,
 );
 rl.prompt();

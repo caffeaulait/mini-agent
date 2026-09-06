@@ -32,7 +32,7 @@ export class Chat {
           messages: this.history,
           tools: toOpenAITools(),
           stream: true,
-          //   reasoning_effort: 'none',
+          reasoning_effort: 'none',
         });
 
         // 流式边攒内容边聚拢工具调用（delta 按 index 碎片下发）
