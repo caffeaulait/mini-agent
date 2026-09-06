@@ -21,6 +21,7 @@ const COMPRESS_SYSTEM = `你是对话压缩器。把用户贴出的历史对话�
  * history 直接用 OpenAI 的消息类型，与接口零转换。
  * Day 2 起具备工具调用能力：模型要求 → 执行工具 → 结果回传 → 继续，直到模型给出最终回答。
  * Day 5 起具备历史压缩：history 超长时先让模型摘要旧消息，腾出上下文。
+ * Day 6 起可导入、导出 history，供多会话管理器在切换时保存与恢复。
  */
 export class Chat {
   private client: OpenAI;
@@ -30,6 +31,16 @@ export class Chat {
   constructor(baseURL: string, apiKey: string, model: string) {
     this.client = new OpenAI({ baseURL, apiKey });
     this.model = model;
+  }
+
+  exportHistory(): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
+    return this.history;
+  }
+
+  importHistory(
+    messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+  ): void {
+    this.history = messages;
   }
 
   /** history 的粗略体积：按消息序列化后的字符数估算，超出 MAX_HISTORY_CHARS 即需压缩。 */
