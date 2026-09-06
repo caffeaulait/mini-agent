@@ -1,4 +1,5 @@
 import { createInterface } from 'node:readline';
+import 'dotenv/config';
 import { loadConfig } from './config.js';
 import { Chat } from './chat.js';
 import { installCliConfirm } from './tools.js';
@@ -19,10 +20,12 @@ function printHelp(): void {
     'sys',
     `可用命令：
   /help   显示帮助
+  /compact 立即压缩旧对话摘要（不等自动触发）
   /reset  清空本轮对话记忆
   /exit   退出（等价于 Ctrl+C / Ctrl+D）
-已接入工具：get_current_time（当前时间）、run_shell（执行 shell 命令，执行前需确认）——模型需要时会自动调用。
-输入任意内容即可与模型对话。`,
+已接入工具：get_current_time（当前时间）、run_shell（执行 shell 命令，执行前需确认）、ls（列目录）、read（读文件）、glob（通配符查文件）——三者只读、免确认；write（写文件）、patch（按片段精确修改）——后两者写入前会展示 diff 并确认。模型需要时会自动调用。
+ 历史保护：history 累积过久时自动压缩——让模型把旧对话摘要成一条「此前对话摘要」，保留最近几条消息原样，腾出上下文（压缩进度以黄色行提示）。
+ 输入任意内容即可与模型对话。`,
     true,
   );
 }
@@ -45,6 +48,10 @@ rl.on('line', async (raw) => {
           chat.reset();
           out('sys', '（已清空对话记忆）', true);
           break;
+        case '/compact':
+          out('sys', '\n'); // 压缩进度另起一行
+          out('tool', `[${await chat.compact()}]`, true);
+          break;
         case '/exit':
           rl.close();
           return;
@@ -55,7 +62,10 @@ rl.on('line', async (raw) => {
       try {
         out('sys', '\n'); // 模型回复另起一行
         for await (const delta of chat.streamReply(line)) {
-          out(delta.startsWith('\n[调用工具') ? 'tool' : 'model', delta);
+          // 进度行（工具调用 / 历史压缩）用黄色，真正的回复用绿色
+          const isProgress =
+            delta.startsWith('\n[调用工具') || delta.startsWith('\n[历史压缩');
+          out(isProgress ? 'tool' : 'model', delta);
         }
         out('sys', '\n');
       } catch (e) {
@@ -75,7 +85,7 @@ rl.on('close', () => {
 
 out(
   'sys',
-  `Mini Agent Day 3 —— Agent 动手：Shell 执行工具（模型：${config.model}，输入 /help 查看命令）`,
+  `Mini Agent Day 5 —— 历史压缩（模型：${config.model}，输入 /help 查看命令）`,
   true,
 );
 rl.prompt();
