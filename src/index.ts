@@ -1,23 +1,41 @@
-// day7/index.ts
+// day8/index.ts
 import 'dotenv/config';
+import { basename } from 'node:path';
+import { visibleWidth } from '@earendil-works/pi-tui';
 import { loadConfig } from './config.js';
 import { Chat } from './chat.js';
-import { setConfirmFn } from './tools.js';
 import { Sessions } from './sessions.js';
 import { loadSessions, saveSessions } from './storage.js';
 import { TUI, estimateTokens } from './tui.js';
+import {
+  loadPermissions,
+  permissionRoot,
+  setupPermissions,
+} from './permissions.js';
+import { undo } from './undo.js';
 
 /** 模型上下文窗口（tokens）：demo 直接写死，用于计算「上下文占用比例」。 */
 const CONTEXT_WINDOW = 64000;
+/** 面板内容宽 26 列；「根目录  」占 8 列，剩余 18 列优先留给最后一级目录。 */
+const ROOT_DISPLAY_WIDTH = 18;
 
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
   console.error(
-    'Day 7 的 TUI 需要真实终端（TTY）；管道 / 重定向下请运行 day6。',
+    'Day 8 的 TUI 需要真实终端（TTY）；管道 / 重定向下请运行 day6。',
   );
   process.exit(1);
 }
 
 const config = loadConfig();
+let permissions;
+try {
+  permissions = await loadPermissions();
+} catch (e) {
+  console.error(
+    `.miniagent/permissions.json 读取失败：${(e as Error).message}`,
+  );
+  process.exit(1);
+}
 const chat = new Chat(config.baseURL, config.apiKey, config.model);
 const sessions = new Sessions();
 
@@ -27,8 +45,7 @@ const usage = { cum: 0, round: 0, live: 0 };
 let busy = false;
 
 const tui = new TUI(onLine, onExit);
-// 把工具层的执行确认接到 TUI：默认实现是「一律拒绝」，这里换成输入行上的 [y/N]
-setConfirmFn((prompt) => tui.confirm(prompt));
+setupPermissions(permissions, (prompt) => tui.confirm(prompt));
 chat.setUsageListener((u) => {
   usage.live = 0; // 真实用量到了，清掉流式估算，避免短暂重复计数
   usage.cum += u.total;
@@ -40,9 +57,13 @@ chat.setUsageListener((u) => {
 function buildPanel(): string[] {
   const window = CONTEXT_WINDOW;
   const ctx = estimateTokens(JSON.stringify(chat.exportHistory()));
+  const root = permissionRoot();
+  const shownRoot =
+    visibleWidth(root) <= ROOT_DISPLAY_WIDTH ? root : `…/${basename(root)}`;
   return [
     `模型  ${config.model}`,
     `会话  ${sessions.currentId()}`,
+    `根目录  ${shownRoot}`,
     '──── 上下文 ────',
     `${ctx} / ${window} tokens`,
     `${Math.ceil((ctx / window) * 100)}% used`,
@@ -69,7 +90,7 @@ function printHelp(): void {
   /sessions 列出内存中的会话
   /reset   清空当前会话记忆
   /exit    保存全部会话并退出（等价于 Ctrl+C / Ctrl+D）
-已接入工具：get_current_time（当前时间）、run_shell（执行 shell，需确认）、ls / read / glob（只读、免确认）、write / patch（写入前展示 diff 并确认）。
+工具权限由 .miniagent/permissions.json 的 allow / ask / deny 控制；文件工具只能访问 root 内的路径。
 右侧面板实时显示本轮 / 累计 tokens 与上下文占用比例：消耗看得见，挤爆之前就知道该压缩了。`,
     'sys',
   );
@@ -93,6 +114,13 @@ async function handleCommand(line: string): Promise<void> {
       break;
     case '/compact':
       tui.append(`[${await chat.compact()}]`, 'tool');
+      break;
+    case '/undo':
+      try {
+        tui.append(`（${await undo()}）`, 'sys');
+      } catch (e) {
+        tui.append(`撤销失败：${(e as Error).message}`, 'sys');
+      }
       break;
     case '/save':
       try {
@@ -215,5 +243,5 @@ async function onExit(): Promise<void> {
 
 tui.start();
 updatePanel();
-tui.append('Mini Agent Day 7 —— 轻量 TUI + 用量显示', 'sys');
-tui.append('输入 /help 查看命令；右侧面板实时显示用量。', 'sys');
+tui.append('MiniAgent Day 8 —— 权限边界与写入回滚', 'sys');
+tui.append('输入 /help 查看命令；/undo 可撤销最近一次文件写入。', 'sys');

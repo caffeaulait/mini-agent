@@ -2,9 +2,16 @@ import { exec } from 'node:child_process';
 import { readdir, readFile, glob, mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { promisify } from 'node:util';
-import type { Interface as ReadLine } from 'node:readline';
 import type { ChatCompletionTool } from 'openai/resources/chat/completions';
-import { out } from './color.js';
+import {
+  authorize,
+  permissionRoot,
+  policyFor,
+  redact,
+  safeGlob,
+  safePath,
+} from './permissions.js';
+import { backup } from './undo.js';
 
 const execAsync = promisify(exec);
 
@@ -34,6 +41,8 @@ export interface Tool {
   /** OpenAI function 的 parameters 层（如 { type: 'object', properties, additionalProperties }） */
   parameters: Record<string, unknown>;
   run(args: Record<string, unknown>): Promise<string> | string;
+  /** 工具内部需要先构造 diff 等详细提示时，自行调用 authorize。 */
+  authorizes?: boolean;
 }
 
 /** 工具注册表。新增工具调用 registerTool 收口，重复名字直接报错。 */
@@ -57,7 +66,7 @@ const BUILTIN_TOOLS: Tool[] = [
   {
     name: 'run_shell',
     description:
-      '在本地执行一条 shell 命令（bash -c），返回合并后的标准输出/错误。执行前会向用户确认。纯查看文件请优先用 ls / read / glob（只读、免确认）。',
+      '在本地执行一条 shell 命令（bash -c），返回合并后的标准输出/错误。是否确认由权限配置决定。纯查看文件请优先用 ls / read / glob。',
     parameters: {
       type: 'object',
       properties: {
@@ -70,7 +79,7 @@ const BUILTIN_TOOLS: Tool[] = [
       const command = String(args.command ?? '').trim();
       if (!command) return '缺少参数 command';
 
-      if (!(await confirm(`即将执行命令：${command}`))) {
+      if (!(await authorize('run_shell', `即将执行命令：${command}`))) {
         return '已取消执行';
       }
 
@@ -88,6 +97,7 @@ const BUILTIN_TOOLS: Tool[] = [
         return truncate(`命令执行失败（${e.message}）\n${partial}`);
       }
     },
+    authorizes: true,
   },
   {
     name: 'ls',
@@ -104,8 +114,9 @@ const BUILTIN_TOOLS: Tool[] = [
       additionalProperties: false,
     },
     run: async (args) => {
-      const dir = String(args.path ?? '.').trim() || '.';
+      const input = String(args.path ?? '.').trim() || '.';
       try {
+        const dir = await safePath(input);
         const entries = await readdir(dir, { withFileTypes: true });
         if (entries.length === 0) return '(空目录)';
         const lines = entries
@@ -138,10 +149,11 @@ const BUILTIN_TOOLS: Tool[] = [
       additionalProperties: false,
     },
     run: async (args) => {
-      const file = String(args.path ?? '').trim();
-      if (!file) return '缺少参数 path';
+      const input = String(args.path ?? '').trim();
+      if (!input) return '缺少参数 path';
       const offset = Math.max(0, Number(args.offset) || 0);
       try {
+        const file = await safePath(input);
         const text = await readFile(file, 'utf8');
         if (offset >= text.length) return 'offset 已越过文件末尾';
         const slice = text.slice(offset, offset + MAX_OUTPUT_CHARS);
@@ -176,8 +188,8 @@ const BUILTIN_TOOLS: Tool[] = [
       if (!pattern) return '缺少参数 pattern';
       try {
         const files: string[] = [];
-        for await (const p of glob(pattern, {
-          cwd: process.cwd(),
+        for await (const p of glob(safeGlob(pattern), {
+          cwd: permissionRoot(),
           exclude: (dir) => dir.includes('node_modules'),
         })) {
           files.push(p.replaceAll('\\', '/'));
@@ -198,7 +210,7 @@ const BUILTIN_TOOLS: Tool[] = [
   {
     name: 'write',
     description:
-      '写入或整体覆盖一个文本文件。展示新旧内容的 diff 并请求确认；自动创建缺失的父目录；适合新建文件或整体重写，小幅修改请优先用 patch。',
+      '写入或整体覆盖一个文本文件。ask 策略下展示新旧内容的 diff 并请求确认；自动创建缺失的父目录；适合新建文件或整体重写，小幅修改请优先用 patch。',
     parameters: {
       type: 'object',
       properties: {
@@ -212,11 +224,17 @@ const BUILTIN_TOOLS: Tool[] = [
       additionalProperties: false,
     },
     run: async (args) => {
-      const file = String(args.path ?? '').trim();
-      if (!file) return '缺少参数 path';
-      const wrote = await commitWrite(file, String(args.content ?? ''));
-      return wrote ? `已写入 ${file}` : '已取消写入';
+      const input = String(args.path ?? '').trim();
+      if (!input) return '缺少参数 path';
+      const file = await safePath(input);
+      const wrote = await commitWrite(
+        'write',
+        file,
+        String(args.content ?? ''),
+      );
+      return wrote ? `已写入 ${input}` : '已取消写入';
     },
+    authorizes: true,
   },
   {
     name: 'patch',
@@ -249,8 +267,9 @@ const BUILTIN_TOOLS: Tool[] = [
       additionalProperties: false,
     },
     run: async (args) => {
-      const file = String(args.path ?? '').trim();
-      if (!file) return '缺少参数 path';
+      const input = String(args.path ?? '').trim();
+      if (!input) return '缺少参数 path';
+      const file = await safePath(input);
       const hunks = (
         Array.isArray(args.hunks) ? args.hunks : []
       ) as PatchHunk[];
@@ -271,9 +290,10 @@ const BUILTIN_TOOLS: Tool[] = [
         patched = patched.slice(0, i) + h.new + patched.slice(i + h.old.length);
       }
       if (patched === original) return '替换后内容与原文件一致，未做任何修改';
-      const wrote = await commitWrite(file, patched);
-      return wrote ? `已应用 ${hunks.length} 处修改到 ${file}` : '已取消修改';
+      const wrote = await commitWrite('patch', file, patched);
+      return wrote ? `已应用 ${hunks.length} 处修改到 ${input}` : '已取消修改';
     },
+    authorizes: true,
   },
 ];
 
@@ -324,58 +344,29 @@ function simpleDiff(oldText: string, newText: string): string {
 }
 
 /** 展示 diff 并确认后写盘；新文件也照常走此流程。内容没变则不打扰用户，直接返回成功。 */
-async function commitWrite(file: string, next: string): Promise<boolean> {
-  let oldtxt = '';
+async function commitWrite(
+  tool: 'write' | 'patch',
+  file: string,
+  next: string,
+): Promise<boolean> {
+  let oldtxt: string | null = null;
   try {
     oldtxt = await readFile(file, 'utf8');
-  } catch {
-    /* 新文件：旧内容视为空 */
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
   if (oldtxt === next) return true;
-  if (!(await confirm(`\n${simpleDiff(oldtxt, next)}\n确认写入 ${file}？`)))
+  if (
+    !(await authorize(
+      tool,
+      `\n${simpleDiff(oldtxt ?? '', next)}\n确认写入 ${file}？`,
+    ))
+  )
     return false;
+  await backup(file, oldtxt);
   await mkdir(dirname(file), { recursive: true });
   await writeFile(file, next);
   return true;
-}
-
-/**
- * 执行前确认的抽象。设计成可注入的函数：后续的权限模型直接替换 setConfirmFn 即可
- * （白名单 / ask / allow / deny），工具循环与工具定义都无需改动。
- *
- * 默认实现是「拒绝」——这样即使调用方忘记注入交互式确认，命令也绝不会在无人确认下执行。
- */
-type ConfirmFn = (prompt: string) => Promise<boolean>;
-
-let confirm: ConfirmFn = async () => false;
-
-/** 注入交互式确认逻辑（后续权限模型可在此替换）。 */
-export function setConfirmFn(fn: ConfirmFn): void {
-  confirm = fn;
-}
-
-/**
- * 基于「唯一的那一个」readline 接口构造 CLI 确认：临时挂一个 line 监听器读一次回答，
- * 读完即移除，主 rl 始终不 close。这是确认能力的默认 CLI 实现，属于 tools 内部细节，
- * 不单独导出；外部通过 installCliConfirm(rl) 安装。
- */
-function buildCliConfirm(rl: ReadLine): ConfirmFn {
-  return (prompt) =>
-    new Promise<boolean>((resolve) => {
-      const onLine = (raw: string) => {
-        rl.removeListener('line', onLine);
-        const ans = raw.trim().toLowerCase();
-        resolve(ans === 'y' || ans === 'yes');
-      };
-      rl.on('line', onLine);
-      rl.resume();
-      out('tool', `${prompt} [y/N] `);
-    });
-}
-
-/** 用主 REPL 的 readline 接口安装 CLI 确认（index.ts 调用这一行即可）。 */
-export function installCliConfirm(rl: ReadLine): void {
-  setConfirmFn(buildCliConfirm(rl));
 }
 
 /** 把注册表里的工具转成 OpenAI Chat Completions 的 tools 参数格式。 */
@@ -405,12 +396,15 @@ export async function execTool(
   try {
     args = argsJson ? JSON.parse(argsJson) : {};
   } catch {
-    return `参数不是合法 JSON：${argsJson}`;
+    return redact(`参数不是合法 JSON：${argsJson}`);
   }
 
   try {
-    return await tool.run(args);
+    if (policyFor(name) === 'deny') return `权限拒绝：工具 ${name} 不允许执行`;
+    if (!tool.authorizes && !(await authorize(name)))
+      return `权限拒绝：工具 ${name} 不允许执行`;
+    return redact(await tool.run(args));
   } catch (err) {
-    return `工具执行失败：${(err as Error).message}`;
+    return redact(`工具执行失败：${(err as Error).message}`);
   }
 }
