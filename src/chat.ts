@@ -4,6 +4,13 @@ import { execTool, toOpenAITools } from './tools.js';
 /** 工具调用循环的最多轮数，防止模型陷入「调用工具 → 再调用」的死循环。 */
 const MAX_TOOL_TURNS = 5;
 
+/** 单次请求的用量信息（同 OpenAI 的 usage 字段）。 */
+export interface UsageInfo {
+  prompt: number;
+  completion: number;
+  total: number;
+}
+
 /** 触发历史压缩的字符阈值：history 序列化总长超过即把旧消息压成摘要。可用环境变量调小以便观察触发过程。 */
 const MAX_HISTORY_CHARS = Number(process.env.AGENT_MAX_HISTORY) || 4000;
 /** 压缩时保留最近几条完整消息，只摘要更早的——刚发生的对话需要原样细节，久远的才值得变薄。 */
@@ -22,15 +29,22 @@ const COMPRESS_SYSTEM = `你是对话压缩器。把用户贴出的历史对话�
  * Day 2 起具备工具调用能力：模型要求 → 执行工具 → 结果回传 → 继续，直到模型给出最终回答。
  * Day 5 起具备历史压缩：history 超长时先让模型摘要旧消息，腾出上下文。
  * Day 6 起可导入、导出 history，供多会话管理器在切换时保存与恢复。
+ * Day 7 起每次请求回报用量（usage），供面板实时展示。
  */
 export class Chat {
   private client: OpenAI;
   private model: string;
   private history: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
+  /** Day 7：每次请求拿到用量就回调出去，供 TUI 面板累计显示。 */
+  private onUsage?: (u: UsageInfo) => void;
 
   constructor(baseURL: string, apiKey: string, model: string) {
     this.client = new OpenAI({ baseURL, apiKey });
     this.model = model;
+  }
+
+  setUsageListener(fn: (u: UsageInfo) => void): void {
+    this.onUsage = fn;
   }
 
   exportHistory(): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
@@ -65,6 +79,7 @@ export class Chat {
         { role: 'user', content: JSON.stringify(old, null, 2) },
       ],
     });
+    this.reportUsage(res.usage);
     const text = res.choices[0]?.message?.content?.trim();
     if (!text) return 0;
     this.history = [
@@ -115,6 +130,7 @@ export class Chat {
           messages: this.history,
           tools: toOpenAITools(),
           stream: true,
+          stream_options: { include_usage: true }, // Day 7：请求末尾的 chunk 里带上本次用量
           reasoning_effort: 'none',
         });
 
@@ -140,6 +156,7 @@ export class Chat {
             if (tc.function?.name) call.name += tc.function.name;
             if (tc.function?.arguments) call.args += tc.function.arguments;
           }
+          if (chunk.usage) this.reportUsage(chunk.usage); // 只有最后一个 chunk 才带 usage
         }
 
         const toolCalls = [...calls.values()];
@@ -185,6 +202,16 @@ export class Chat {
       this.history.pop();
       throw err;
     }
+  }
+
+  /** 把接口返回的 usage 归一化成 UsageInfo，回调给外部累计。 */
+  private reportUsage(usage: OpenAI.CompletionUsage | null | undefined): void {
+    if (!usage) return;
+    this.onUsage?.({
+      prompt: usage.prompt_tokens,
+      completion: usage.completion_tokens,
+      total: usage.total_tokens,
+    });
   }
 
   reset(): void {
