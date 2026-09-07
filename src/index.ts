@@ -345,9 +345,9 @@ async function onExit(): Promise<void> {
 
 tui.start();
 updatePanel();
-tui.append('miniAgent Day 11 —— 技能系统', 'sys');
-const skillNames = skills.map((s) => s.name).join('、') || '（暂无）';
+
+tui.append('Mini Agent Day 12 —— 代码搜索 + Web 抓取', 'sys');
 tui.append(
-  `可在 day11/skills/ 下看到${skillNames}。想看技能长什么样，/skills 列出来、/use <名字> 加载、/unuse 卸载。`,
+  '想看某段代码出现在哪，直接让模型去 search；想读仓库外的文档、博文，让模型 fetch 回来转成文本。检索结果会显示 路径:行号，方便顺着找。',
   'sys',
 );

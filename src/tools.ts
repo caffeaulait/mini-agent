@@ -1,6 +1,13 @@
 import { exec } from 'node:child_process';
-import { readdir, readFile, glob, mkdir, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import {
+  readdir,
+  readFile,
+  glob,
+  mkdir,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
+import { dirname, join, relative } from 'node:path';
 import { promisify } from 'node:util';
 import type { ChatCompletionTool } from 'openai/resources/chat/completions';
 import {
@@ -23,6 +30,12 @@ const MAX_OUTPUT_CHARS = 2000;
 const MAX_GLOB_RESULTS = 200;
 /** 写入前 diff 预览最多展示的行数，避免整文件覆盖时刷屏。 */
 const MAX_DIFF_LINES = 100;
+/** search 最多返回的命中行数，命中太多说明关键词不够聚焦。 */
+const MAX_SEARCH_RESULTS = 50;
+/** search 只扫不超过这个字节数的文本文件，跳过体积可疑的大文件。 */
+const MAX_SEARCH_FILE_SIZE = 1024 * 1024;
+/** fetch 最长的等待时间，超时按失败处理。 */
+const FETCH_TIMEOUT_MS = 15_000;
 
 /** patch 的单个修改片段：把文件中唯一出现的 old 替换为 new。 */
 interface PatchHunk {
@@ -222,6 +235,93 @@ const BUILTIN_TOOLS: Tool[] = [
     },
   },
   {
+    name: 'search',
+    description:
+      '在仓库内按内容检索代码（忽略大小写）。返回 相对路径:行号: 内容，适合找「哪个文件里出现了某段文字/某个调用」。默认跳过 node_modules、隐藏路径、二进制与大于 1MB 的文件。',
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: {
+          type: 'string',
+          description:
+            '要检索的关键词，如 "safePath"、一个函数名或一行报错文案。',
+        },
+        path: {
+          type: 'string',
+          description:
+            '要检索的相对目录，默认整个仓库根目录；传子目录可加快速度。',
+        },
+      },
+      required: ['pattern'],
+      additionalProperties: false,
+    },
+    run: async (args) => {
+      const pattern = String(args.pattern ?? '').trim();
+      if (!pattern) return '缺少参数 pattern';
+      const sub = String(args.path ?? '').trim();
+      try {
+        const dir = sub ? await safePath(sub) : permissionRoot();
+        const hits = await searchTree(dir, pattern.toLowerCase());
+        if (hits.length === 0)
+          return `没有匹配 "${pattern}"${sub ? `（在 ${sub} 下）` : ''}`;
+        const hint =
+          hits.length >= MAX_SEARCH_RESULTS
+            ? `\n...(已达上限 ${MAX_SEARCH_RESULTS} 行，换更聚焦的关键词再搜)`
+            : '';
+        return `匹配 "${pattern}" ${hits.length} 行：\n${hits.join('\n')}${hint}`;
+      } catch (err) {
+        return `search 失败：${(err as Error).message}`;
+      }
+    },
+  },
+  {
+    name: 'fetch',
+    description:
+      '抓取一个网页并转成纯文本，让模型看到仓库之外的信息（文档、博文、报错页等）。默认 ask 策略，执行前需要确认；只支持 http/https。',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: {
+          type: 'string',
+          description: '要访问的完整网址，以 http:// 或 https:// 开头。',
+        },
+      },
+      required: ['url'],
+      additionalProperties: false,
+    },
+    run: async (args) => {
+      const input = String(args.url ?? '').trim();
+      if (!input) return '缺少参数 url';
+      let target: URL;
+      try {
+        target = new URL(input);
+      } catch {
+        return `URL 不合法：${input}`;
+      }
+      if (target.protocol !== 'http:' && target.protocol !== 'https:')
+        return '只支持 http/https 链接';
+      if (!(await authorize('fetch', `\n即将访问网页：\n${input}\n确认抓取？`)))
+        return '已取消抓取';
+      try {
+        const res = await fetch(target, {
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+          redirect: 'follow',
+        });
+        if (!res.ok) return `请求失败：HTTP ${res.status} ${res.statusText}`;
+        const text = await res.text();
+        const contentType = res.headers.get('content-type') ?? '';
+        const body = /\bhtml\b/.test(contentType) ? htmlToText(text) : text;
+        return truncate(body);
+      } catch (err) {
+        const e = err as Error;
+        return e.name === 'TimeoutError'
+          ? `抓取超时（${FETCH_TIMEOUT_MS / 1000}s），可稍后重试`
+          : `抓取失败：${e.message}`;
+      }
+    },
+    authorizes: true,
+  },
+  {
     name: 'write',
     description:
       '写入或整体覆盖一个文本文件。ask 策略下展示新旧内容的 diff 并请求确认；自动创建缺失的父目录；适合新建文件或整体重写，小幅修改请优先用 patch。',
@@ -317,6 +417,75 @@ BUILTIN_TOOLS.forEach(registerTool);
 function truncate(text: string): string {
   if (text.length <= MAX_OUTPUT_CHARS) return text;
   return `${text.slice(0, MAX_OUTPUT_CHARS)}\n...(输出已截断，原共 ${text.length} 字符)`;
+}
+
+/**
+ * 在 dir 目录内按内容检索：用 Node 内置 glob 枚举文件（默认跳过隐藏路径与 node_modules），
+ * 跳过二进制（含空字节）与过大的文件，逐行做忽略大小写的包含匹配，凑满上限即停。
+ * 返回「相对 root 的路径:行号: 内容」列表，格式照搬 ripgrep。
+ */
+async function searchTree(dir: string, pattern: string): Promise<string[]> {
+  const root = permissionRoot();
+  const prefix = relative(root, dir);
+  const hits: string[] = [];
+  for await (const p of glob('**/*', {
+    cwd: dir,
+    exclude: (d) =>
+      d.split('/').some((seg) => seg === 'node_modules' || seg.startsWith('.')),
+  })) {
+    if (hits.length >= MAX_SEARCH_RESULTS) break;
+    const rel =
+      (prefix ? `${prefix.replaceAll('\\', '/')}/` : '') +
+      p.replaceAll('\\', '/');
+    const file = join(dir, p);
+    let st;
+    try {
+      st = await stat(file);
+    } catch {
+      continue; // 文件可能在被遍历时被删除
+    }
+    if (!st.isFile() || st.size > MAX_SEARCH_FILE_SIZE) continue;
+    let text: string;
+    try {
+      text = await readFile(file, 'utf8');
+    } catch {
+      continue;
+    }
+    if (text.includes('\0')) continue; // 含空字节基本是二进制，跳过
+    text.split('\n').forEach((line, i) => {
+      if (hits.length >= MAX_SEARCH_RESULTS) return;
+      if (line.toLowerCase().includes(pattern))
+        hits.push(`${rel}:${i + 1}: ${line.trimEnd()}`);
+    });
+  }
+  return hits;
+}
+
+/**
+ * 极简 HTML → 纯文本：剥掉脚本/样式/注释，块级标签换行，解码常见实体。
+ * 不追求完整解析，够把文档、博文读成模型能用的文本。
+ */
+function htmlToText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(
+      /<\/(?:p|div|h[1-6]|li|ul|ol|tr|td|th|table|pre|blockquote|section|article|header|footer)>/gi,
+      '\n',
+    )
+    .replace(/<(?:br|hr)[\s\S]*?>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&nbsp;/gi, ' ')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n');
 }
 
 /** 按行拆文本：忽略结尾换行带来的空串；空文本返回空数组。 */
