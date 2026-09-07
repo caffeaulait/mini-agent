@@ -1,4 +1,4 @@
-// day9/index.ts
+// day10/index.ts
 import 'dotenv/config';
 import { basename } from 'node:path';
 import { visibleWidth } from '@earendil-works/pi-tui';
@@ -13,7 +13,9 @@ import {
   setupPermissions,
 } from './permissions.js';
 import { undo } from './undo.js';
-import { setupPlanning, formatTodos } from './todos.js';
+import { formatTodos, setupPlanning } from './todos.js';
+import { listMemories, loadMemory, setupMemory } from './memory.js';
+import { loadInstructions } from './instructions.js';
 
 /** 模型上下文窗口（tokens）：demo 直接写死，用于计算「上下文占用比例」。 */
 const CONTEXT_WINDOW = 64000;
@@ -22,7 +24,7 @@ const ROOT_DISPLAY_WIDTH = 18;
 
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
   console.error(
-    'Day 9 的 TUI 需要真实终端（TTY）；管道 / 重定向下请运行 day6。',
+    'Day 10 的 TUI 需要真实终端（TTY）；管道 / 重定向下请运行 day6。',
   );
   process.exit(1);
 }
@@ -37,7 +39,20 @@ try {
   );
   process.exit(1);
 }
-const chat = new Chat(config.baseURL, config.apiKey, config.model);
+let instructions = '';
+try {
+  await loadMemory();
+  instructions = await loadInstructions(permissions.root);
+} catch (e) {
+  console.error(`项目上下文读取失败：${(e as Error).message}`);
+  process.exit(1);
+}
+const chat = new Chat(
+  config.baseURL,
+  config.apiKey,
+  config.model,
+  instructions,
+);
 const sessions = new Sessions();
 
 /** 用量状态：live 是流式进行中按字符估算的增量；正式总数以接口 usage 为准。 */
@@ -47,6 +62,7 @@ let busy = false;
 
 const tui = new TUI(onLine, onExit);
 setupPlanning((task) => chat.delegate(task), updatePanel);
+setupMemory(updatePanel);
 setupPermissions(permissions, (prompt) => tui.confirm(prompt));
 chat.setUsageListener((u) => {
   usage.live = 0; // 真实用量到了，清掉流式估算，避免短暂重复计数
@@ -67,6 +83,8 @@ function buildPanel(): string[] {
     `模型  ${config.model}`,
     `会话  ${sessions.currentId()}`,
     `根目录  ${shownRoot}`,
+    `记忆  ${listMemories().length} 条`,
+    `指令  ${instructions ? '已加载' : '无'}`,
     '──── 上下文 ────',
     `${ctx} / ${window} tokens`,
     `${Math.ceil((ctx / window) * 100)}% used`,
@@ -88,14 +106,17 @@ function printHelp(): void {
     `可用命令：
   /help    显示帮助
   /compact 立即压缩旧对话摘要（不等自动触发）
+  /undo    撤销最近一次 write / patch 写入
+  /todos   查看 Agent 当前的 TODO 列表
+  /memory  查看跨会话保留的长期记忆
   /save    保存全部会话到 .miniagent/sessions.json
   /load    从 .miniagent/sessions.json 恢复全部会话
   /new <id> 新建并切换到会话
   /open <id> 切换会话
   /sessions 列出内存中的会话
-  /reset   清空当前会话记忆
+  /reset   清空当前会话历史（长期记忆保留）
   /exit    保存全部会话并退出（等价于 Ctrl+C / Ctrl+D）
-工具权限由 .miniagent/permissions.json 的 allow / ask / deny 控制；文件工具只能访问 root 内的路径。
+工具权限由 .miniagent/miniAgent.json 的 allow / ask / deny 控制；文件工具只能访问 root 内的路径。
 右侧面板实时显示本轮 / 累计 tokens 与上下文占用比例：消耗看得见，挤爆之前就知道该压缩了。`,
     'sys',
   );
@@ -115,7 +136,7 @@ async function handleCommand(line: string): Promise<void> {
       break;
     case '/reset':
       chat.reset();
-      tui.append('（已清空对话记忆）', 'sys');
+      tui.append('（已清空当前会话历史，长期记忆保留）', 'sys');
       break;
     case '/compact':
       tui.append(`[${await chat.compact()}]`, 'tool');
@@ -131,6 +152,17 @@ async function handleCommand(line: string): Promise<void> {
       const todos = formatTodos();
       tui.append(
         todos.length > 0 ? `TODO：\n${todos.join('\n')}` : '（暂无 TODO）',
+        'sys',
+      );
+      break;
+    }
+    case '/memory': {
+      const memories = listMemories();
+      const lines = memories.map((item, i) => `${i + 1}. ${item}`);
+      tui.append(
+        lines.length > 0
+          ? `长期记忆：\n${lines.join('\n')}`
+          : '（暂无长期记忆）',
         'sys',
       );
       break;
@@ -256,5 +288,5 @@ async function onExit(): Promise<void> {
 
 tui.start();
 updatePanel();
-tui.append('Mini Agent Day 9 —— 任务规划与子 Agent', 'sys');
-tui.append('输入 /help 查看命令；任务计划会实时显示在右侧。', 'sys');
+tui.append('Mini Agent Day 10 —— 长期记忆', 'sys');
+tui.append('输入 /help 查看命令；重要结论可跨会话保留。', 'sys');
