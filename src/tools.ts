@@ -54,6 +54,20 @@ export function registerTool(tool: Tool): void {
   registry.push(tool);
 }
 
+/** 技能卸载时移除它自带的工具，让注册表回到加载前的样子。 */
+export function unregisterTool(name: string): void {
+  const index = registry.findIndex((t) => t.name === name);
+  if (index >= 0) registry.splice(index, 1);
+}
+
+/** 当前可见工具的名单；null 表示全部可见（没有技能激活时）。 */
+let visibleTools: string[] | null = null;
+
+/** 技能激活时把可见工具收敛到技能声明的集合；卸载时传 null 恢复全部工具。 */
+export function setVisibleTools(names: string[] | null): void {
+  visibleTools = names;
+}
+
 /** 内置工具数组：逐一注册进注册表，之后模型就能自动调用了。 */
 const BUILTIN_TOOLS: Tool[] = [
   {
@@ -369,16 +383,18 @@ async function commitWrite(
   return true;
 }
 
-/** 把注册表里的工具转成 OpenAI Chat Completions 的 tools 参数格式。 */
+/** 把注册表里的工具转成 OpenAI Chat Completions 的 tools 参数格式；技能激活时只暴露它声明的工具。 */
 export function toOpenAITools(): ChatCompletionTool[] {
-  return registry.map((tool) => ({
-    type: 'function',
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    },
-  }));
+  return registry
+    .filter((tool) => !visibleTools || visibleTools.includes(tool.name))
+    .map((tool) => ({
+      type: 'function',
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      },
+    }));
 }
 
 /**

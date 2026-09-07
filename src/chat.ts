@@ -37,6 +37,7 @@ export class Chat {
   private client: OpenAI;
   private model: string;
   private instructions: string;
+  private skillInstructions = '';
   private history: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
   /** Day 7：每次请求拿到用量就回调出去，供 TUI 面板累计显示。 */
   private onUsage?: (u: UsageInfo) => void;
@@ -50,6 +51,20 @@ export class Chat {
     this.client = new OpenAI({ baseURL, apiKey });
     this.model = model;
     this.instructions = instructions;
+  }
+
+  /** Day 11：挂上当前技能的指令，拼接进每次请求的 system prompt；传空串表示无技能。 */
+  setSkillInstructions(text: string): void {
+    this.skillInstructions = text;
+  }
+
+  /** 组装 system prompt：任务基石 + 项目指令 + 技能指令。 */
+  private systemPrompt(): string {
+    const skill = this.skillInstructions.trim();
+    return (
+      `${AGENT_SYSTEM}\n\n项目指令（AGENTS.md）：\n${this.instructions || '暂无'}` +
+      (skill ? `\n\n技能指令：\n${skill}` : '')
+    );
   }
 
   setUsageListener(fn: (u: UsageInfo) => void): void {
@@ -161,10 +176,7 @@ export class Chat {
         const stream = await this.client.chat.completions.create({
           model: this.model,
           messages: [
-            {
-              role: 'system',
-              content: `${AGENT_SYSTEM}\n\n项目指令（AGENTS.md）：\n${this.instructions || '暂无'}`,
-            },
+            { role: 'system', content: this.systemPrompt() },
             ...this.history,
           ],
           tools: toOpenAITools(),

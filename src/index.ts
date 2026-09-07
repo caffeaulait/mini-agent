@@ -1,4 +1,4 @@
-// day10/index.ts
+// day11/index.ts
 import 'dotenv/config';
 import { basename } from 'node:path';
 import { visibleWidth } from '@earendil-works/pi-tui';
@@ -16,6 +16,13 @@ import { undo } from './undo.js';
 import { formatTodos, setupPlanning } from './todos.js';
 import { listMemories, loadMemory, setupMemory } from './memory.js';
 import { loadInstructions } from './instructions.js';
+import {
+  activeSkill,
+  listSkills,
+  loadSkills,
+  unuseSkill,
+  useSkill,
+} from './skills.js';
 
 /** 模型上下文窗口（tokens）：demo 直接写死，用于计算「上下文占用比例」。 */
 const CONTEXT_WINDOW = 64000;
@@ -24,7 +31,7 @@ const ROOT_DISPLAY_WIDTH = 18;
 
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
   console.error(
-    'Day 10 的 TUI 需要真实终端（TTY）；管道 / 重定向下请运行 day6。',
+    'Day 11 的 TUI 需要真实终端（TTY）；管道 / 重定向下请运行 day6。',
   );
   process.exit(1);
 }
@@ -54,6 +61,7 @@ const chat = new Chat(
   instructions,
 );
 const sessions = new Sessions();
+const skills = await loadSkills();
 
 /** 用量状态：live 是流式进行中按字符估算的增量；正式总数以接口 usage 为准。 */
 const usage = { cum: 0, round: 0, live: 0 };
@@ -85,6 +93,7 @@ function buildPanel(): string[] {
     `根目录  ${shownRoot}`,
     `记忆  ${listMemories().length} 条`,
     `指令  ${instructions ? '已加载' : '无'}`,
+    `技能  ${activeSkill()?.name ?? '无'}`,
     '──── 上下文 ────',
     `${ctx} / ${window} tokens`,
     `${Math.ceil((ctx / window) * 100)}% used`,
@@ -101,6 +110,18 @@ function updatePanel(): void {
   tui.setPanel(buildPanel());
 }
 
+/** 描述当前技能带什么工具：自带工具 + 内置工具收敛的白名单，都展示出来。 */
+function describeActiveSkill(): string {
+  const skill = activeSkill();
+  if (!skill) return '无';
+  const parts: string[] = [];
+  if (skill.tools.length)
+    parts.push(`自带工具：${skill.tools.map((t) => t.name).join('、')}`);
+  if (skill.builtinTools.length)
+    parts.push(`内置工具：${skill.builtinTools.join('、')}`);
+  return parts.length ? `${skill.name}（${parts.join('；')}）` : skill.name;
+}
+
 function printHelp(): void {
   tui.append(
     `可用命令：
@@ -109,6 +130,9 @@ function printHelp(): void {
   /undo    撤销最近一次 write / patch 写入
   /todos   查看 Agent 当前的 TODO 列表
   /memory  查看跨会话保留的长期记忆
+  /skills  列出可用技能
+  /use     加载技能（/use <名字>）
+  /unuse   卸载当前技能
   /save    保存全部会话到 .miniagent/sessions.json
   /load    从 .miniagent/sessions.json 恢复全部会话
   /new <id> 新建并切换到会话
@@ -167,6 +191,39 @@ async function handleCommand(line: string): Promise<void> {
       );
       break;
     }
+    case '/skills': {
+      const lines = listSkills()
+        .filter((s) => s.name)
+        .map(
+          (s) =>
+            `${activeSkill()?.name === s.name ? '*' : ' '} ${s.name} — ${s.description}`,
+        );
+      tui.append(
+        lines.length > 0
+          ? `可用技能（skills/ 目录，/use 加载）：\n${lines.join('\n')}`
+          : '（skills/ 目录下暂无技能）',
+        'sys',
+      );
+      break;
+    }
+    case '/use':
+      if (!id) {
+        tui.append('用法：/use <技能名>（/skills 查看可用技能）', 'sys');
+        break;
+      }
+      try {
+        useSkill(id);
+        chat.setSkillInstructions(activeSkill()?.instructions ?? '');
+        tui.append(`已加载技能 ${describeActiveSkill()}`, 'tool');
+      } catch (e) {
+        tui.append(`加载失败：${(e as Error).message}`, 'sys');
+      }
+      break;
+    case '/unuse':
+      unuseSkill();
+      chat.setSkillInstructions('');
+      tui.append('（已卸载技能，恢复默认行为）', 'tool');
+      break;
     case '/save':
       try {
         const { count, file } = await saveAll();
@@ -288,5 +345,9 @@ async function onExit(): Promise<void> {
 
 tui.start();
 updatePanel();
-tui.append('Mini Agent Day 10 —— 长期记忆', 'sys');
-tui.append('输入 /help 查看命令；重要结论可跨会话保留。', 'sys');
+tui.append('miniAgent Day 11 —— 技能系统', 'sys');
+const skillNames = skills.map((s) => s.name).join('、') || '（暂无）';
+tui.append(
+  `可在 day11/skills/ 下看到${skillNames}。想看技能长什么样，/skills 列出来、/use <名字> 加载、/unuse 卸载。`,
+  'sys',
+);

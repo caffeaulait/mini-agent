@@ -1,4 +1,4 @@
-// day8/permissions.ts
+// day11/permissions.ts
 import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
@@ -42,7 +42,7 @@ export async function loadPermissions(
   }
   const value = JSON.parse(raw) as { root?: unknown; tools?: unknown };
   if (typeof value.root !== 'string' || !value.root.trim())
-    throw new Error('permissions.json 的 root 必须是非空字符串');
+    throw new Error('miniAgent.json 的 root 必须是非空字符串');
   if (
     !value.tools ||
     typeof value.tools !== 'object' ||
@@ -74,6 +74,11 @@ export function permissionRoot(): string {
 
 export function policyFor(tool: string): Policy {
   return config.tools[tool] ?? 'deny';
+}
+
+/** 技能自带的工具不在默认配置里，加载时补一条默认策略（默认 ask），避免被一律 deny 卡死。 */
+export function ensureToolPolicy(tool: string, policy: Policy): void {
+  if (config.tools[tool] === undefined) config.tools[tool] = policy;
 }
 
 export async function authorize(
