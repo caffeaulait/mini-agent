@@ -1,4 +1,4 @@
-// day8/index.ts
+// day9/index.ts
 import 'dotenv/config';
 import { basename } from 'node:path';
 import { visibleWidth } from '@earendil-works/pi-tui';
@@ -13,6 +13,7 @@ import {
   setupPermissions,
 } from './permissions.js';
 import { undo } from './undo.js';
+import { setupPlanning, formatTodos } from './todos.js';
 
 /** 模型上下文窗口（tokens）：demo 直接写死，用于计算「上下文占用比例」。 */
 const CONTEXT_WINDOW = 64000;
@@ -21,7 +22,7 @@ const ROOT_DISPLAY_WIDTH = 18;
 
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
   console.error(
-    'Day 8 的 TUI 需要真实终端（TTY）；管道 / 重定向下请运行 day6。',
+    'Day 9 的 TUI 需要真实终端（TTY）；管道 / 重定向下请运行 day6。',
   );
   process.exit(1);
 }
@@ -45,6 +46,7 @@ const usage = { cum: 0, round: 0, live: 0 };
 let busy = false;
 
 const tui = new TUI(onLine, onExit);
+setupPlanning((task) => chat.delegate(task), updatePanel);
 setupPermissions(permissions, (prompt) => tui.confirm(prompt));
 chat.setUsageListener((u) => {
   usage.live = 0; // 真实用量到了，清掉流式估算，避免短暂重复计数
@@ -53,13 +55,14 @@ chat.setUsageListener((u) => {
   updatePanel();
 });
 
-/** 右侧面板：模型、会话、上下文占用与本轮 / 累计 tokens。 */
+/** 右侧面板：模型、会话、用量，以及 Agent 当前维护的 TODO。 */
 function buildPanel(): string[] {
   const window = CONTEXT_WINDOW;
   const ctx = estimateTokens(JSON.stringify(chat.exportHistory()));
   const root = permissionRoot();
   const shownRoot =
     visibleWidth(root) <= ROOT_DISPLAY_WIDTH ? root : `…/${basename(root)}`;
+  const todos = formatTodos();
   return [
     `模型  ${config.model}`,
     `会话  ${sessions.currentId()}`,
@@ -71,6 +74,8 @@ function buildPanel(): string[] {
     `${usage.round + usage.live} tokens`,
     '──── 累计 ────',
     `${usage.cum} tokens`,
+    '──── TODO ────',
+    ...(todos.length > 0 ? todos : ['（暂无任务）']),
   ];
 }
 
@@ -122,6 +127,14 @@ async function handleCommand(line: string): Promise<void> {
         tui.append(`撤销失败：${(e as Error).message}`, 'sys');
       }
       break;
+    case '/todos': {
+      const todos = formatTodos();
+      tui.append(
+        todos.length > 0 ? `TODO：\n${todos.join('\n')}` : '（暂无 TODO）',
+        'sys',
+      );
+      break;
+    }
     case '/save':
       try {
         const { count, file } = await saveAll();
@@ -243,5 +256,5 @@ async function onExit(): Promise<void> {
 
 tui.start();
 updatePanel();
-tui.append('MiniAgent Day 8 —— 权限边界与写入回滚', 'sys');
-tui.append('输入 /help 查看命令；/undo 可撤销最近一次文件写入。', 'sys');
+tui.append('Mini Agent Day 9 —— 任务规划与子 Agent', 'sys');
+tui.append('输入 /help 查看命令；任务计划会实时显示在右侧。', 'sys');

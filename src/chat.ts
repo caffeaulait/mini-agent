@@ -2,7 +2,9 @@ import OpenAI from 'openai';
 import { execTool, toOpenAITools } from './tools.js';
 
 /** 工具调用循环的最多轮数，防止模型陷入「调用工具 → 再调用」的死循环。 */
-const MAX_TOOL_TURNS = 5;
+const MAX_TOOL_TURNS = 30;
+
+const AGENT_SYSTEM = `你是一个本地编码 Agent。遇到需要多个步骤的任务时，先调用 todo_write 制定简短计划，再逐项执行并更新状态；用户明确要求 TODO 或任务清单时，必须先调用 todo_write。简单任务直接完成，不要为了形式创建 TODO。可把边界清楚的分析、设计或审查任务交给 delegate_task，多个子任务必须串行委派。`;
 
 /** 单次请求的用量信息（同 OpenAI 的 usage 字段）。 */
 export interface UsageInfo {
@@ -45,6 +47,23 @@ export class Chat {
 
   setUsageListener(fn: (u: UsageInfo) => void): void {
     this.onUsage = fn;
+  }
+
+  /** 子 Agent 使用独立上下文完成一个聚焦任务，结果回到主 Agent 后再继续 pipeline。 */
+  async delegate(task: string): Promise<string> {
+    const res = await this.client.chat.completions.create({
+      model: this.model,
+      messages: [
+        {
+          role: 'system',
+          content:
+            '你是子 Agent。只完成给定子任务，返回简洁、可直接交给主 Agent 使用的结果；不要寒暄。',
+        },
+        { role: 'user', content: task },
+      ],
+    });
+    this.reportUsage(res.usage);
+    return res.choices[0]?.message?.content?.trim() || '子 Agent 未返回结果';
   }
 
   exportHistory(): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
@@ -112,6 +131,11 @@ export class Chat {
    */
   async *streamReply(userInput: string): AsyncGenerator<string> {
     this.history.push({ role: 'user', content: userInput });
+    const wantsTodo =
+      /todo|任务清单|然后|最后|再.{0,12}(?:给出|总结|汇总)|并(?:给出|总结|汇总)/i.test(
+        userInput,
+      );
+    let mustUpdateTodo = false;
     try {
       // Day 5：历史超长时先把旧消息压成摘要，腾出上下文给本轮；压缩失败也不打断对话。
       if (this.historySize() > MAX_HISTORY_CHARS) {
@@ -125,10 +149,18 @@ export class Chat {
         }
       }
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+        const forceTodo = (turn === 0 && wantsTodo) || mustUpdateTodo;
+        mustUpdateTodo = false;
         const stream = await this.client.chat.completions.create({
           model: this.model,
-          messages: this.history,
+          messages: [
+            { role: 'system', content: AGENT_SYSTEM },
+            ...this.history,
+          ],
           tools: toOpenAITools(),
+          tool_choice: forceTodo
+            ? { type: 'function', function: { name: 'todo_write' } }
+            : 'auto',
           stream: true,
           stream_options: { include_usage: true }, // Day 7：请求末尾的 chunk 里带上本次用量
           reasoning_effort: 'none',
@@ -184,6 +216,7 @@ export class Chat {
               content: result,
             });
           }
+          mustUpdateTodo = toolCalls.some((c) => c.name === 'delegate_task');
           continue;
         }
 
