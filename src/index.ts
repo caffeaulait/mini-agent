@@ -22,6 +22,7 @@ import {
   setupMemory,
 } from './memory.js';
 import { addToRag, loadRag, ragStats, setupRag } from './rag.js';
+import { connectMcpServers, mcpStatuses, stopMcpServers } from './mcp.js';
 import { loadInstructions } from './instructions.js';
 import {
   activeSkill,
@@ -86,12 +87,29 @@ setupPlanning((task) => chat.delegate(task), updatePanel);
 setupMemory(updatePanel);
 setupRag(updatePanel);
 setupPermissions(permissions, (prompt) => tui.confirm(prompt));
+try {
+  await connectMcpServers();
+} catch (e) {
+  console.error(`MCP 配置读取失败：${(e as Error).message}`);
+  process.exit(1);
+}
 chat.setUsageListener((u) => {
   usage.live = 0; // 真实用量到了，清掉流式估算，避免短暂重复计数
   usage.cum += u.total;
   usage.round += u.total;
   updatePanel();
 });
+
+/** 描述当前 MCP 接入情况：每个 server 的工具数或失败原因。 */
+function mcpLine(): string {
+  const statuses = mcpStatuses();
+  if (statuses.length === 0) return '无';
+  return statuses
+    .map((s) =>
+      s.error ? `${s.server}(启动失败)` : `${s.server}(${s.tools.length})`,
+    )
+    .join('、');
+}
 
 /** 右侧面板：模型、会话、用量，以及 Agent 当前维护的 TODO。 */
 function buildPanel(): string[] {
@@ -108,6 +126,7 @@ function buildPanel(): string[] {
     `记忆  ${listMemories().length} 条 / ${memoryBlocks()} 块`,
     `指令  ${instructions ? '已加载' : '无'}`,
     `技能  ${activeSkill()?.name ?? '无'}`,
+    `MCP  ${mcpLine()}`,
     '──── 上下文 ────',
     `${ctx} / ${window} tokens`,
     `${Math.ceil((ctx / window) * 100)}% used`,
@@ -144,6 +163,7 @@ function printHelp(): void {
   /undo    撤销最近一次 write / patch 写入
   /todos   查看 Agent 当前的 TODO 列表
   /memory  查看跨会话保留的长期记忆
+  /mcp     查看已接入的 MCP server 与工具清单
   /rag     采集建库（/rag add <URL 或路径>...）/查看知识库
   /skills  列出可用技能
   /use     加载技能（/use <名字>）
@@ -155,7 +175,7 @@ function printHelp(): void {
   /sessions 列出内存中的会话
   /reset   清空当前会话历史（长期记忆保留）
   /exit    保存全部会话并退出（等价于 Ctrl+C / Ctrl+D）
-工具权限由 .miniagent/miniAgent.json 的 allow / ask / deny 控制；文件工具只能访问 root 内的路径。
+工具权限由 .miniagent/permissions.json 的 allow / ask / deny 控制；文件工具只能访问 root 内的路径。
 右侧面板实时显示本轮 / 累计 tokens 与上下文占用比例：消耗看得见，挤爆之前就知道该压缩了。`,
     'sys',
   );
@@ -204,6 +224,23 @@ async function handleCommand(line: string): Promise<void> {
           : '（暂无长期记忆）',
         'sys',
       );
+      break;
+    }
+    case '/mcp': {
+      const statuses = mcpStatuses();
+      if (statuses.length === 0) {
+        tui.append(
+          '（未接入 MCP server；在 .miniagent/mcp.json 里声明后重启生效）',
+          'sys',
+        );
+        break;
+      }
+      const lines = statuses.map((s) =>
+        s.error
+          ? `× ${s.server}：${s.error}`
+          : `${s.server}（${s.tools.length} 个工具）\n${s.tools.map((t) => `  ${t}`).join('\n')}`,
+      );
+      tui.append(lines.join('\n'), 'sys');
       break;
     }
     case '/rag': {
@@ -318,6 +355,7 @@ async function handleCommand(line: string): Promise<void> {
       }
       break;
     case '/exit':
+      stopMcpServers();
       await onExit();
       break;
     default:
@@ -365,6 +403,7 @@ async function onLine(line: string): Promise<void> {
 }
 
 async function onExit(): Promise<void> {
+  stopMcpServers(); // 关掉 MCP server 子进程，再恢复原来的终端内容
   tui.stop(); // 恢复原来的终端内容后再用 console 打印
   try {
     const generatedId = sessions.nameDefault(chat.exportHistory());
@@ -383,8 +422,8 @@ async function onExit(): Promise<void> {
 
 tui.start();
 updatePanel();
-tui.append('Mini Agent Day 14 —— 轻 RAG 知识库', 'sys');
+tui.append('Mini Agent Day 15 —— MCP 工具接入', 'sys');
 tui.append(
-  '长期记忆保存项目事实，知识库保存外部资料：/rag add 采集网页或文件，rag_search 返回带来源的相关段落。',
+  '.miniagent/mcp.json 里声明的 server 已自动接入：它们的工具以 mcp_ 前缀出现在工具清单里，/mcp 查看详情。',
   'sys',
 );
