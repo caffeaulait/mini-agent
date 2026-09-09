@@ -14,7 +14,14 @@ import {
 } from './permissions.js';
 import { undo } from './undo.js';
 import { formatTodos, setupPlanning } from './todos.js';
-import { listMemories, loadMemory, setupMemory } from './memory.js';
+import {
+  listMemories,
+  loadMemory,
+  memoryBlocks,
+  recallMemory,
+  setupMemory,
+} from './memory.js';
+import { addToRag, loadRag, ragStats, setupRag } from './rag.js';
 import { loadInstructions } from './instructions.js';
 import {
   activeSkill,
@@ -54,6 +61,12 @@ try {
   console.error(`项目上下文读取失败：${(e as Error).message}`);
   process.exit(1);
 }
+try {
+  await loadRag();
+} catch (e) {
+  console.error(`知识库读取失败：${(e as Error).message}`);
+  process.exit(1);
+}
 const chat = new Chat(
   config.baseURL,
   config.apiKey,
@@ -71,6 +84,7 @@ let busy = false;
 const tui = new TUI(onLine, onExit);
 setupPlanning((task) => chat.delegate(task), updatePanel);
 setupMemory(updatePanel);
+setupRag(updatePanel);
 setupPermissions(permissions, (prompt) => tui.confirm(prompt));
 chat.setUsageListener((u) => {
   usage.live = 0; // 真实用量到了，清掉流式估算，避免短暂重复计数
@@ -91,7 +105,7 @@ function buildPanel(): string[] {
     `模型  ${config.model}`,
     `会话  ${sessions.currentId()}`,
     `根目录  ${shownRoot}`,
-    `记忆  ${listMemories().length} 条`,
+    `记忆  ${listMemories().length} 条 / ${memoryBlocks()} 块`,
     `指令  ${instructions ? '已加载' : '无'}`,
     `技能  ${activeSkill()?.name ?? '无'}`,
     '──── 上下文 ────',
@@ -130,6 +144,7 @@ function printHelp(): void {
   /undo    撤销最近一次 write / patch 写入
   /todos   查看 Agent 当前的 TODO 列表
   /memory  查看跨会话保留的长期记忆
+  /rag     采集建库（/rag add <URL 或路径>...）/查看知识库
   /skills  列出可用技能
   /use     加载技能（/use <名字>）
   /unuse   卸载当前技能
@@ -189,6 +204,28 @@ async function handleCommand(line: string): Promise<void> {
           : '（暂无长期记忆）',
         'sys',
       );
+      break;
+    }
+    case '/rag': {
+      const args = line.slice('/rag'.length).trim();
+      if (!args) {
+        tui.append(ragStats(), 'sys');
+      } else if (args.startsWith('add ')) {
+        const sources = args.slice(4).trim().split(/\s+/).filter(Boolean);
+        for (const src of sources) {
+          try {
+            const result = await addToRag(src);
+            tui.append(`[${result}]`, 'tool');
+          } catch (e) {
+            tui.append(`采集失败：${(e as Error).message}`, 'sys');
+          }
+        }
+      } else {
+        tui.append(
+          '用法：/rag add <网页 URL 或文件路径>... 采集建库；/rag 查看知识库',
+          'sys',
+        );
+      }
       break;
     }
     case '/skills': {
@@ -291,6 +328,7 @@ async function handleCommand(line: string): Promise<void> {
 
 async function reply(line: string): Promise<void> {
   usage.round = 0;
+  chat.setRecall(recallMemory(line)); // 自动唤起：用户一开口，相关记忆先进 system prompt
   try {
     tui.append('', 'sys'); // 回复前空一行，把上一段对话隔开
     for await (const delta of chat.streamReply(line)) {
@@ -345,9 +383,8 @@ async function onExit(): Promise<void> {
 
 tui.start();
 updatePanel();
-
-tui.append('Mini Agent Day 12 —— 代码搜索 + Web 抓取', 'sys');
+tui.append('Mini Agent Day 14 —— 轻 RAG 知识库', 'sys');
 tui.append(
-  '想看某段代码出现在哪，直接让模型去 search；想读仓库外的文档、博文，让模型 fetch 回来转成文本。检索结果会显示 路径:行号，方便顺着找。',
+  '长期记忆保存项目事实，知识库保存外部资料：/rag add 采集网页或文件，rag_search 返回带来源的相关段落。',
   'sys',
 );

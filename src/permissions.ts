@@ -1,4 +1,4 @@
-// day11/permissions.ts
+// day12/permissions.ts
 import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
@@ -23,6 +23,8 @@ const DEFAULT_TOOLS: Record<string, Policy> = {
   delegate_task: 'allow',
   memory_write: 'allow',
   memory_search: 'allow',
+  rag_add: 'ask',
+  rag_search: 'allow',
 };
 
 let config: PermissionConfig = { root: process.cwd(), tools: DEFAULT_TOOLS };
@@ -44,7 +46,7 @@ export async function loadPermissions(
   }
   const value = JSON.parse(raw) as { root?: unknown; tools?: unknown };
   if (typeof value.root !== 'string' || !value.root.trim())
-    throw new Error('miniAgent.json 的 root 必须是非空字符串');
+    throw new Error('permissions.json 的 root 必须是非空字符串');
   if (
     !value.tools ||
     typeof value.tools !== 'object' ||

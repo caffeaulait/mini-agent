@@ -38,6 +38,8 @@ export class Chat {
   private model: string;
   private instructions: string;
   private skillInstructions = '';
+  /** Day 13：每轮用户输入触发的自动唤起记忆，拼进本轮 system prompt；空串表示无唤起。 */
+  private recalled = '';
   private history: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
   /** Day 7：每次请求拿到用量就回调出去，供 TUI 面板累计显示。 */
   private onUsage?: (u: UsageInfo) => void;
@@ -58,12 +60,21 @@ export class Chat {
     this.skillInstructions = text;
   }
 
-  /** 组装 system prompt：任务基石 + 项目指令 + 技能指令。 */
+  /** Day 13：挂上本轮自动唤起的记忆文本；主程序在每次用户提问前调用，空串表示无唤起。 */
+  setRecall(text: string): void {
+    this.recalled = text;
+  }
+
+  /** 组装 system prompt：任务基石 + 项目指令 + 技能指令 + 自动唤起记忆。 */
   private systemPrompt(): string {
     const skill = this.skillInstructions.trim();
+    const recall = this.recalled.trim();
     return (
       `${AGENT_SYSTEM}\n\n项目指令（AGENTS.md）：\n${this.instructions || '暂无'}` +
-      (skill ? `\n\n技能指令：\n${skill}` : '')
+      (skill ? `\n\n技能指令：\n${skill}` : '') +
+      (recall
+        ? `\n\n自动唤起长期记忆（仅供本轮参考，可能有噪声，涉及重要事实请与用户确认）：\n${recall}`
+        : '')
     );
   }
 

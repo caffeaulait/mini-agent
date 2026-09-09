@@ -465,7 +465,7 @@ async function searchTree(dir: string, pattern: string): Promise<string[]> {
  * 极简 HTML → 纯文本：剥掉脚本/样式/注释，块级标签换行，解码常见实体。
  * 不追求完整解析，够把文档、博文读成模型能用的文本。
  */
-function htmlToText(html: string): string {
+export function htmlToText(html: string): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
